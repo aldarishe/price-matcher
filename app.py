@@ -5,7 +5,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import io
 
-st.set_page_config(page_title="Сравнение цен (Вес-контроль)", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Сравнение цен", page_icon="⚖️", layout="wide")
 
 st.title("⚖️ Сравнение цен")
 st.markdown("""
@@ -177,5 +177,6 @@ if file1 and file2:
             st.download_button("Скачать", b.getvalue(), "result_checked.xlsx")
         else:
             st.warning("Ничего не найдено.")
+
 
 

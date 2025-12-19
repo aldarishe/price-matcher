@@ -7,10 +7,9 @@ import io
 
 st.set_page_config(page_title="Сравнение цен (Вес-контроль)", page_icon="⚖️", layout="wide")
 
-st.title("⚖️ Сравнение цен (Проверка веса)")
+st.title("⚖️ Сравнение цен")
 st.markdown("""
-Этот алгоритм **умеет читать вес**. 
-Если товары называются одинаково (напр. "Сахар"), но вес разный (800г vs 1кг), они **не сопоставятся**.
+не обещаю 100% совпадения, просто я я так увидел)
 """)
 
 def aggressive_clean_name(name):
@@ -178,3 +177,4 @@ if file1 and file2:
             st.download_button("Скачать", b.getvalue(), "result_checked.xlsx")
         else:
             st.warning("Ничего не найдено.")
+

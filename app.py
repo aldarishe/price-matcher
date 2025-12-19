@@ -5,42 +5,64 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import io
 
-st.set_page_config(page_title="Сравнение цен (Simple)", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Сравнение цен (Точное)", page_icon="🎯", layout="wide")
 
-st.title("⚖️ Сравнение цен (Только товары)")
+st.title("🎯 Сравнение цен (Улучшенная точность)")
 st.markdown("""
-Загрузите два прайс-листа. Скрипт найдет похожие товары и сравнит цены.
+Этот алгоритм лучше понимает сокращения и цифры (например, видит, что **"100г"** и **"100 г"** — это одно и то же).
 Коды товаров в итоговую таблицу не добавляются.
 """)
 
-def clean_name(name):
+def aggressive_clean_name(name):
+    """
+    Улучшенная очистка для повышения точности:
+    1. Нижний регистр.
+    2. Замена 'ё' на 'е'.
+    3. Разделение букв и цифр (100г -> 100 г).
+    4. Удаление спецсимволов.
+    """
     if not isinstance(name, str):
         return ""
+    
+    # 1. Базовая очистка
     name = name.lower()
-    return re.sub(r'[\s\W_]+', ' ', name).strip()
+    name = name.replace('ё', 'е')
+    
+    # 2. Важно: Разделяем цифры и буквы (чтобы "1кг" и "1 кг" стали одинаковыми)
+    # Вставляет пробел между цифрой и буквой (100г -> 100 г)
+    name = re.sub(r'(?<=\d)(?=[а-яa-z])', ' ', name)
+    # Вставляет пробел между буквой и цифрой (№1 -> № 1)
+    name = re.sub(r'(?<=[а-яa-z])(?=\d)', ' ', name)
+    
+    # 3. Заменяем запятые в цифрах на точки (3,2% -> 3.2%)
+    name = name.replace(',', '.')
+    
+    # 4. Удаляем всё, кроме букв, цифр и пробелов (убираем кавычки, скобки, №, /)
+    name = re.sub(r'[^a-zа-я0-9\s\.]', ' ', name)
+    
+    # 5. Убираем лишние пробелы
+    return re.sub(r'\s+', ' ', name).strip()
 
 def find_best_column(df, target_type):
     """
-    Умный поиск колонок.
-    Игнорирует колонки с кодами при поиске названий, чтобы не терять совпадения.
+    Умный поиск колонок (игнорирует артикулы при поиске названий).
     """
     cols = df.columns
-    cols_lower = [c.lower() for c in cols]
+    cols_lower = [str(c).lower() for c in cols]
     
     if target_type == 'name':
-        # 1. Ищем явное "наименование" или "название"
+        # 1. Приоритет: явное "наименование"
         strict_keywords = ['наименование', 'название', 'name']
         for k in strict_keywords:
             for i, col_name in enumerate(cols_lower):
                 if k in col_name:
                     return cols[i]
         
-        # 2. Ищем "товар", НО строго исключаем "код", "id", "sku"
-        # Это решает проблему, когда "Код товара" считался названием
+        # 2. Поиск "товар", исключая "код"
         soft_keywords = ['товар', 'продукт', 'product', 'item']
         for k in soft_keywords:
             for i, col_name in enumerate(cols_lower):
-                if k in col_name and not any(x in col_name for x in ['код', 'id', 'sku', 'code']):
+                if k in col_name and not any(x in col_name for x in ['код', 'id', 'sku', 'code', 'art']):
                     return cols[i]
 
     elif target_type == 'price':
@@ -55,30 +77,37 @@ def process_files(file1, file2, threshold):
     df1 = pd.read_excel(file1)
     df2 = pd.read_excel(file2)
     
-    # Ищем только Название и Цену
+    # Поиск колонок
     name_col1 = find_best_column(df1, 'name')
     price_col1 = find_best_column(df1, 'price')
     
     name_col2 = find_best_column(df2, 'name')
     price_col2 = find_best_column(df2, 'price')
 
-    # Диагностика для пользователя
     st.info(f"""
-    **Распознанные колонки:**
-    Файл 1: Товар='{name_col1}', Цена='{price_col1}'
-    Файл 2: Товар='{name_col2}', Цена='{price_col2}'
+    **Найдено:**
+    Файл 1: Товар='{name_col1}'
+    Файл 2: Товар='{name_col2}'
     """)
 
     if not name_col1 or not price_col1 or not name_col2 or not price_col2:
-        st.error("Не удалось найти колонки с названием или ценой. Проверьте заголовки файлов.")
+        st.error("Не удалось найти колонки. Проверьте заголовки.")
         return None
 
-    df1['clean_name'] = df1[name_col1].apply(clean_name)
-    df2['clean_name'] = df2[name_col2].apply(clean_name)
+    # Применяем УЛУЧШЕННУЮ очистку
+    df1['clean_name'] = df1[name_col1].apply(aggressive_clean_name)
+    df2['clean_name'] = df2[name_col2].apply(aggressive_clean_name)
     
+    # Векторизация (настраиваем n-граммы для лучшего поиска частей слов)
+    # ngram_range=(2, 4) - ищет совпадения по частям слов длиной от 2 до 4 букв
     vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
-    tfidf_matrix1 = vectorizer.fit_transform(df1['clean_name'].astype(str))
-    tfidf_matrix2 = vectorizer.transform(df2['clean_name'].astype(str))
+    
+    try:
+        tfidf_matrix1 = vectorizer.fit_transform(df1['clean_name'].astype(str))
+        tfidf_matrix2 = vectorizer.transform(df2['clean_name'].astype(str))
+    except ValueError:
+        st.error("Ошибка обработки текста. Возможно, файлы пустые или содержат некорректные данные.")
+        return None
     
     cosine_sim = cosine_similarity(tfidf_matrix1, tfidf_matrix2)
     
@@ -111,7 +140,6 @@ def process_files(file1, file2, threshold):
     res_df = pd.DataFrame(matches)
     res_df['Разница'] = res_df['Цена (Наша)'] - res_df['Цена (Конкурент)']
     
-    # Итоговый порядок колонок (без кодов)
     cols_order = ['Товар (Наш)', 'Товар (Конкурент)', 'Цена (Наша)', 'Цена (Конкурент)', 'Разница', 'Сходство (%)']
     return res_df[cols_order]
 
@@ -123,22 +151,24 @@ with col1:
 with col2:
     file2 = st.file_uploader("Файл 2 (Конкурент)", type=['xlsx', 'xls'], key="f2")
 
-threshold_val = st.slider("Порог сходства", 0.0, 1.0, 0.65, 0.05)
+# Добавили пояснение к слайдеру
+threshold_val = st.slider(
+    "Порог сходства", 
+    min_value=0.0, max_value=1.0, value=0.60, step=0.05,
+    help="Рекомендуемое значение: 0.60 - 0.70. Если ставить ниже, будет много ошибок. Если выше — найдет только полные копии."
+)
 
 if file1 and file2:
     if st.button("🚀 Сравнить", type="primary"):
-        try:
-            res = process_files(file1, file2, threshold_val)
-            if res is not None and not res.empty:
-                st.success(f"Найдено совпадений: {len(res)}")
-                st.dataframe(res, use_container_width=True)
-                
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    res.to_excel(writer, index=False)
-                
-                st.download_button("Скачать Excel", buffer.getvalue(), "result.xlsx")
-            else:
-                st.warning("Ничего не найдено.")
-        except Exception as e:
-            st.error(f"Ошибка: {e}")
+        res = process_files(file1, file2, threshold_val)
+        if res is not None and not res.empty:
+            st.success(f"Найдено совпадений: {len(res)}")
+            st.dataframe(res, use_container_width=True)
+            
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                res.to_excel(writer, index=False)
+            
+            st.download_button("Скачать Excel", buffer.getvalue(), "result_exact.xlsx")
+        else:
+            st.warning("Ничего не найдено. Попробуйте уменьшить порог сходства.")

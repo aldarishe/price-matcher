@@ -6,12 +6,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 import io
 
 # Настройка страницы
-st.set_page_config(page_title="Сравнение цен", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Сравнение цен + Код", page_icon="⚖️", layout="wide")
 
-st.title("⚖️ Сравнение цен в двух прайс-листах")
+st.title("⚖️ Сравнение цен (с артикулами)")
 st.markdown("""
-Загрузите два Excel файла, и алгоритм автоматически найдет одинаковые товары 
-(даже если названия написаны немного по-разному) и сравнит их цены.
+Загрузите два файла:
+1. **Основной файл** (содержит: Код, Наименование, Цена)
+2. **Файл конкурента** (содержит: Наименование, Цена)
 """)
 
 def clean_name(name):
@@ -21,23 +22,42 @@ def clean_name(name):
     name = re.sub(r'[\s\W_]+', ' ', name).strip()
     return name
 
+def find_column(df, keywords):
+    """Ищет колонку, название которой содержит одно из ключевых слов"""
+    cols = df.columns.str.lower()
+    for keyword in keywords:
+        # Ищем точное или частичное совпадение
+        found = [c for c in df.columns if keyword in c.lower()]
+        if found:
+            return found[0]
+    return None
+
 def process_files(file1, file2, threshold):
     # Читаем файлы
     df1 = pd.read_excel(file1)
     df2 = pd.read_excel(file2)
     
-    # Пытаемся автоматически найти колонки
-    cols1 = df1.columns.str.lower()
-    cols2 = df2.columns.str.lower()
+    # --- Поиск колонок в Файле 1 (Основной) ---
+    # 1. Ищем Код (Артикул)
+    code_col1 = find_column(df1, ['код', 'code', 'sku', 'артикул', 'id', 'art'])
+    # 2. Ищем Наименование
+    name_col1 = find_column(df1, ['наим', 'name', 'товар', 'product'])
+    # 3. Ищем Цену
+    price_col1 = find_column(df1, ['цен', 'price', 'cost', 'sum'])
     
-    # Ищем колонки с названиями (содержат "наим", "name", "товар")
-    name_col1 = df1.columns[cols1.str.contains('наим|name|товар|product')][0]
-    price_col1 = df1.columns[cols1.str.contains('цен|price|cost')][0]
-    
-    name_col2 = df2.columns[cols2.str.contains('наим|name|товар|product')][0]
-    price_col2 = df2.columns[cols2.str.contains('цен|price|cost')][0]
+    # --- Поиск колонок в Файле 2 (Конкурент) ---
+    name_col2 = find_column(df2, ['наим', 'name', 'товар', 'product'])
+    price_col2 = find_column(df2, ['цен', 'price', 'cost', 'sum'])
 
-    # Очистка
+    # Проверка, все ли нашлось
+    if not name_col1 or not price_col1:
+        st.error(f"В файле 1 не найдены колонки Наименования или Цены. Найденные колонки: {list(df1.columns)}")
+        return None
+    if not name_col2 or not price_col2:
+        st.error(f"В файле 2 не найдены колонки Наименования или Цены. Найденные колонки: {list(df2.columns)}")
+        return None
+
+    # Очистка имен для поиска
     df1['clean_name'] = df1[name_col1].apply(clean_name)
     df2['clean_name'] = df2[name_col2].apply(clean_name)
     
@@ -54,7 +74,6 @@ def process_files(file1, file2, threshold):
     total_items = len(df1)
     
     for i in range(total_items):
-        # Обновляем прогресс бар каждые 10%
         if i % (total_items // 10 + 1) == 0:
             progress_bar.progress(i / total_items)
             
@@ -62,13 +81,21 @@ def process_files(file1, file2, threshold):
         score = cosine_sim[i][best_idx]
         
         if score > threshold:
-            matches.append({
-                'Товар (Файл 1)': df1.iloc[i][name_col1],
-                'Товар (Файл 2)': df2.iloc[best_idx][name_col2],
+            # Формируем строку результата
+            row = {
+                'Товар (Наш)': df1.iloc[i][name_col1],
+                'Товар (Конкурент)': df2.iloc[best_idx][name_col2],
                 'Сходство (%)': round(score * 100, 1),
-                'Цена (Файл 1)': df1.iloc[i][price_col1],
-                'Цена (Файл 2)': df2.iloc[best_idx][price_col2]
-            })
+                'Цена (Наша)': df1.iloc[i][price_col1],
+                'Цена (Конкурент)': df2.iloc[best_idx][price_col2]
+            }
+            # Если нашли колонку с кодом, добавляем её в начало
+            if code_col1:
+                row['Код товара'] = df1.iloc[i][code_col1]
+            else:
+                row['Код товара'] = '—'
+                
+            matches.append(row)
             
     progress_bar.progress(100)
     
@@ -76,8 +103,15 @@ def process_files(file1, file2, threshold):
         return None
         
     res_df = pd.DataFrame(matches)
-    res_df['Разница'] = res_df['Цена (Файл 1)'] - res_df['Цена (Файл 2)']
-    res_df = res_df.sort_values('Сходство (%)', ascending=False)
+    
+    # Считаем разницу
+    res_df['Разница'] = res_df['Цена (Наша)'] - res_df['Цена (Конкурент)']
+    
+    # Красивый порядок колонок
+    cols = ['Код товара', 'Товар (Наш)', 'Товар (Конкурент)', 'Цена (Наша)', 'Цена (Конкурент)', 'Разница', 'Сходство (%)']
+    # Если каких-то колонок нет (вдруг ошибка), берем только те, что есть
+    final_cols = [c for c in cols if c in res_df.columns]
+    res_df = res_df[final_cols]
     
     return res_df
 
@@ -86,50 +120,44 @@ def process_files(file1, file2, threshold):
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("📁 Файл 1 (например, Лента)")
-    file1 = st.file_uploader("Загрузить первый Excel", type=['xlsx', 'xls'], key="f1")
+    st.subheader("1. Основной файл (с кодами)")
+    file1 = st.file_uploader("Загрузить файл", type=['xlsx', 'xls'], key="f1")
 
 with col2:
-    st.subheader("📁 Файл 2 (например, Мега)")
-    file2 = st.file_uploader("Загрузить второй Excel", type=['xlsx', 'xls'], key="f2")
+    st.subheader("2. Файл для сравнения")
+    file2 = st.file_uploader("Загрузить файл", type=['xlsx', 'xls'], key="f2")
 
-# Настройки точности (в скрываемом блоке)
 with st.expander("⚙️ Настройки точности поиска"):
     threshold_val = st.slider(
-        "Минимальный порог сходства названий", 
-        min_value=0.0, max_value=1.0, value=0.65, step=0.05,
-        help="Чем выше значение, тем строже поиск. 1.0 - полное совпадение."
+        "Минимальный порог сходства", 
+        min_value=0.0, max_value=1.0, value=0.65, step=0.05
     )
 
 if file1 and file2:
     if st.button("🚀 Начать сравнение", type="primary"):
-        with st.spinner('Анализируем прайс-листы...'):
+        with st.spinner('Ищем совпадения и коды...'):
             try:
                 result_df = process_files(file1, file2, threshold_val)
                 
                 if result_df is not None and not result_df.empty:
                     st.success(f"Готово! Найдено совпадений: {len(result_df)}")
                     
-                    # Метрики
                     total_diff = result_df['Разница'].sum()
-                    st.metric("Общая разница в цене (по найденным товарам)", f"{total_diff:.2f} ₽")
+                    st.metric("Общая разница в цене", f"{total_diff:.2f} ₽")
                     
-                    # Показ таблицы
                     st.dataframe(result_df, use_container_width=True)
                     
-                    # Кнопка скачивания
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                        result_df.to_excel(writer, index=False, sheet_name='Comparison')
+                        result_df.to_excel(writer, index=False, sheet_name='Сравнение')
                     
                     st.download_button(
-                        label="📥 Скачать результат в Excel",
+                        label="📥 Скачать таблицу с кодами (Excel)",
                         data=buffer.getvalue(),
-                        file_name="sravnenie_result.xlsx",
+                        file_name="sravnenie_s_kodami.xlsx",
                         mime="application/vnd.ms-excel"
                     )
                 else:
-                    st.warning("Совпадений не найдено. Попробуйте уменьшить порог сходства в настройках.")
+                    st.warning("Совпадений не найдено. Попробуйте уменьшить порог.")
             except Exception as e:
-                st.error(f"Произошла ошибка при обработке: {e}")
-                st.info("Убедитесь, что в файлах есть колонки с названием 'наименование'/'name' и ценой 'цена'/'price'")
+                st.error(f"Ошибка: {e}")

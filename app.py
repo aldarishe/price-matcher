@@ -1,156 +1,143 @@
-import streamlit as st
 import pandas as pd
+import numpy as np
 import re
+import io
+import ipywidgets as widgets
+from IPython.display import display, clear_output, FileLink
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import io
 
-st.set_page_config(page_title="Сравнение цен v2.1", page_icon="⚖️", layout="wide")
-
-st.title("⚖️ Сравнение цен (Исправленное)")
-st.markdown("""
-Загрузите файлы. Алгоритм теперь умнее определяет, где Название, а где Код товара, 
-чтобы не терять совпадения.
-""")
+# --- Логика обработки (скрыта от пользователя в функции) ---
 
 def clean_name(name):
     if not isinstance(name, str):
         return ""
-    name = name.lower()
-    return re.sub(r'[\s\W_]+', ' ', name).strip()
+    return re.sub(r'[\s\W_]+', ' ', name.lower()).strip()
 
-def find_best_column(df, target_type):
-    """
-    Умный поиск колонок.
-    target_type может быть: 'code', 'name', 'price'
-    """
-    cols = df.columns
-    cols_lower = [c.lower() for c in cols]
+def find_columns(df):
+    """Автоматический поиск колонок с названием и ценой"""
+    cols = df.columns.str.lower()
+    name_col = next((c for c in df.columns if 'наим' in c.lower() or 'name' in c.lower() or 'товар' in c.lower()), df.columns[0])
+    price_col = next((c for c in df.columns if 'цен' in c.lower() or 'price' in c.lower()), df.columns[1])
+    return name_col, price_col
+
+def process_comparison(file1_content, file2_content, threshold):
+    # Чтение файлов из байтов (памяти)
+    df1 = pd.read_excel(io.BytesIO(file1_content))
+    df2 = pd.read_excel(io.BytesIO(file2_content))
     
-    if target_type == 'code':
-        # Приоритет: артикул, код, id, sku
-        keywords = ['артикул', 'код', 'sku', 'id', 'art', 'code']
-        for k in keywords:
-            for i, col_name in enumerate(cols_lower):
-                if k in col_name:
-                    return cols[i]
-                    
-    elif target_type == 'name':
-        # Сначала ищем явное "наименование" или "название"
-        strict_keywords = ['наименование', 'название', 'name']
-        for k in strict_keywords:
-            for i, col_name in enumerate(cols_lower):
-                if k in col_name:
-                    return cols[i]
-        
-        # Если не нашли, ищем "товар" или "продукт", НО исключаем колонки, где есть "код" или "id"
-        soft_keywords = ['товар', 'продукт', 'product', 'item']
-        for k in soft_keywords:
-            for i, col_name in enumerate(cols_lower):
-                if k in col_name and 'код' not in col_name and 'id' not in col_name:
-                    return cols[i]
-
-    elif target_type == 'price':
-        keywords = ['цена', 'price', 'cost', 'сумма', 'rub', 'руб']
-        for k in keywords:
-            for i, col_name in enumerate(cols_lower):
-                if k in col_name:
-                    return cols[i]
-    return None
-
-def process_files(file1, file2, threshold):
-    df1 = pd.read_excel(file1)
-    df2 = pd.read_excel(file2)
+    # Определение колонок
+    name1, price1 = find_columns(df1)
+    name2, price2 = find_columns(df2)
     
-    # 1. Определяем колонки
-    code_col1 = find_best_column(df1, 'code')
-    name_col1 = find_best_column(df1, 'name')
-    price_col1 = find_best_column(df1, 'price')
+    # Подготовка данных
+    df1['clean'] = df1[name1].apply(clean_name)
+    df2['clean'] = df2[name2].apply(clean_name)
     
-    name_col2 = find_best_column(df2, 'name')
-    price_col2 = find_best_column(df2, 'price')
-
-    # Диагностика (показываем пользователю, что нашел скрипт)
-    st.info(f"""
-    **Распознанные колонки:**
-    Файл 1: Название='{name_col1}', Цена='{price_col1}', Код='{code_col1}'
-    Файл 2: Название='{name_col2}', Цена='{price_col2}'
-    """)
-
-    if not name_col1 or not price_col1 or not name_col2 or not price_col2:
-        st.error("Не удалось найти необходимые колонки (Название или Цена). Проверьте заголовки файлов.")
-        return None
-
-    df1['clean_name'] = df1[name_col1].apply(clean_name)
-    df2['clean_name'] = df2[name_col2].apply(clean_name)
-    
+    # Векторизация и поиск (TF-IDF)
     vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
-    tfidf_matrix1 = vectorizer.fit_transform(df1['clean_name'].astype(str))
-    tfidf_matrix2 = vectorizer.transform(df2['clean_name'].astype(str))
+    tfidf_matrix1 = vectorizer.fit_transform(df1['clean'].astype(str))
+    tfidf_matrix2 = vectorizer.transform(df2['clean'].astype(str))
     
     cosine_sim = cosine_similarity(tfidf_matrix1, tfidf_matrix2)
     
     matches = []
     
-    # Прогресс бар
-    progress_bar = st.progress(0)
-    total_items = len(df1)
-    
-    for i in range(total_items):
-        if i % (total_items // 10 + 1) == 0:
-            progress_bar.progress(i / total_items)
-            
+    for i in range(len(df1)):
         best_idx = cosine_sim[i].argmax()
         score = cosine_sim[i][best_idx]
         
         if score > threshold:
-            row = {
-                'Товар (Наш)': df1.iloc[i][name_col1],
-                'Товар (Конкурент)': df2.iloc[best_idx][name_col2],
-                'Сходство (%)': round(score * 100, 1),
-                'Цена (Наша)': df1.iloc[i][price_col1],
-                'Цена (Конкурент)': df2.iloc[best_idx][price_col2]
-            }
-            if code_col1:
-                row['Код товара'] = df1.iloc[i][code_col1]
-            else:
-                row['Код товара'] = '—'
-            matches.append(row)
+            matches.append({
+                'Товар_1': df1.iloc[i][name1],
+                'Товар_2': df2.iloc[best_idx][name2],
+                'Сходство': round(score, 2),
+                'Цена_1': df1.iloc[i][price1],
+                'Цена_2': df2.iloc[best_idx][price2]
+            })
             
-    progress_bar.progress(100)
-    
     if not matches:
         return None
         
     res_df = pd.DataFrame(matches)
-    res_df['Разница'] = res_df['Цена (Наша)'] - res_df['Цена (Конкурент)']
-    
-    # Сортировка колонок
-    cols_order = ['Код товара', 'Товар (Наш)', 'Товар (Конкурент)', 'Цена (Наша)', 'Цена (Конкурент)', 'Разница', 'Сходство (%)']
-    final_cols = [c for c in cols_order if c in res_df.columns]
-    
-    return res_df[final_cols]
+    res_df['Разница'] = res_df['Цена_1'] - res_df['Цена_2']
+    res_df = res_df.sort_values('Сходство', ascending=False)
+    return res_df
 
-# --- UI ---
-col1, col2 = st.columns(2)
-with col1:
-    file1 = st.file_uploader("Файл 1 (Основной)", type=['xlsx', 'xls'], key="f1")
-with col2:
-    file2 = st.file_uploader("Файл 2 (Конкурент)", type=['xlsx', 'xls'], key="f2")
+# --- Интерфейс (Виджеты) ---
 
-threshold_val = st.slider("Порог сходства", 0.0, 1.0, 0.65, 0.05)
+style = {'description_width': 'initial'}
 
-if file1 and file2:
-    if st.button("🚀 Сравнить", type="primary"):
-        res = process_files(file1, file2, threshold_val)
-        if res is not None and not res.empty:
-            st.success(f"Найдено совпадений: {len(res)}")
-            st.dataframe(res, use_container_width=True)
+# Виджеты загрузки
+uploader_1 = widgets.FileUpload(accept='.xlsx', multiple=False, description='Загрузить файл 1 (Лента)')
+uploader_2 = widgets.FileUpload(accept='.xlsx', multiple=False, description='Загрузить файл 2 (Мега)')
+
+# Слайдер точности
+slider_threshold = widgets.FloatSlider(
+    value=0.65, min=0.1, max=1.0, step=0.05, 
+    description='Порог точности:', style=style,
+    layout=widgets.Layout(width='50%')
+)
+
+# Кнопка запуска
+btn_run = widgets.Button(
+    description='Сравнить цены',
+    button_style='primary', # 'success', 'info', 'warning', 'danger' or ''
+    icon='check'
+)
+
+# Область вывода результатов
+output = widgets.Output()
+
+def on_button_clicked(b):
+    with output:
+        clear_output()
+        
+        if not uploader_1.value or not uploader_2.value:
+            print("⚠️ Пожалуйста, загрузите оба файла!")
+            return
             
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                res.to_excel(writer, index=False)
+        print("⏳ Идет анализ данных... Пожалуйста, подождите.")
+        
+        try:
+            # Получение контента файлов (для ipywidgets >= 8.0)
+            content1 = uploader_1.value[0]['content'] if isinstance(uploader_1.value, tuple) else list(uploader_1.value.values())[0]['content']
+            content2 = uploader_2.value[0]['content'] if isinstance(uploader_2.value, tuple) else list(uploader_2.value.values())[0]['content']
             
-            st.download_button("Скачать Excel", buffer.getvalue(), "result.xlsx")
-        else:
-            st.warning("Ничего не найдено. Проверьте колонки (см. синий блок выше).")
+            result_df = process_comparison(content1, content2, slider_threshold.value)
+            
+            clear_output()
+            
+            if result_df is not None:
+                total_diff = result_df['Разница'].sum()
+                color = "green" if total_diff < 0 else "red"
+                
+                display(widgets.HTML(f"<h3>✅ Готово! Найдено совпадений: {len(result_df)}</h3>"))
+                display(widgets.HTML(f"<b>Общая разница: <span style='color:{color}'>{total_diff:.2f} ₽</span></b>"))
+                
+                # Показать таблицу (первые 10 строк)
+                display(result_df.head(10))
+                
+                # Сохранение файла
+                filename = 'comparison_result.xlsx'
+                result_df.to_excel(filename, index=False)
+                display(FileLink(filename, result_html=f'<h3>📥 <a href="{filename}" download>Скачать полный результат (Excel)</a></h3>'))
+                
+            else:
+                print("🤷‍♂️ Совпадений не найдено. Попробуйте уменьшить порог точности.")
+                
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            print("Проверьте структуру файлов (нужны колонки с названием и ценой).")
+
+btn_run.on_click(on_button_clicked)
+
+# Компоновка интерфейса
+ui = widgets.VBox([
+    widgets.HBox([uploader_1, uploader_2]),
+    slider_threshold,
+    btn_run,
+    output
+])
+
+display(ui)

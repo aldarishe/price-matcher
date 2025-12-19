@@ -5,63 +5,85 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import io
 
-# Настройка страницы
-st.set_page_config(page_title="Сравнение цен + Код", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Сравнение цен v2.1", page_icon="⚖️", layout="wide")
 
-st.title("⚖️ Сравнение цен (с артикулами)")
+st.title("⚖️ Сравнение цен (Исправленное)")
 st.markdown("""
-Загрузите два файла:
-1. **Основной файл** (содержит: Код, Наименование, Цена)
-2. **Файл конкурента** (содержит: Наименование, Цена)
+Загрузите файлы. Алгоритм теперь умнее определяет, где Название, а где Код товара, 
+чтобы не терять совпадения.
 """)
 
 def clean_name(name):
     if not isinstance(name, str):
         return ""
     name = name.lower()
-    name = re.sub(r'[\s\W_]+', ' ', name).strip()
-    return name
+    return re.sub(r'[\s\W_]+', ' ', name).strip()
 
-def find_column(df, keywords):
-    """Ищет колонку, название которой содержит одно из ключевых слов"""
-    cols = df.columns.str.lower()
-    for keyword in keywords:
-        # Ищем точное или частичное совпадение
-        found = [c for c in df.columns if keyword in c.lower()]
-        if found:
-            return found[0]
+def find_best_column(df, target_type):
+    """
+    Умный поиск колонок.
+    target_type может быть: 'code', 'name', 'price'
+    """
+    cols = df.columns
+    cols_lower = [c.lower() for c in cols]
+    
+    if target_type == 'code':
+        # Приоритет: артикул, код, id, sku
+        keywords = ['артикул', 'код', 'sku', 'id', 'art', 'code']
+        for k in keywords:
+            for i, col_name in enumerate(cols_lower):
+                if k in col_name:
+                    return cols[i]
+                    
+    elif target_type == 'name':
+        # Сначала ищем явное "наименование" или "название"
+        strict_keywords = ['наименование', 'название', 'name']
+        for k in strict_keywords:
+            for i, col_name in enumerate(cols_lower):
+                if k in col_name:
+                    return cols[i]
+        
+        # Если не нашли, ищем "товар" или "продукт", НО исключаем колонки, где есть "код" или "id"
+        soft_keywords = ['товар', 'продукт', 'product', 'item']
+        for k in soft_keywords:
+            for i, col_name in enumerate(cols_lower):
+                if k in col_name and 'код' not in col_name and 'id' not in col_name:
+                    return cols[i]
+
+    elif target_type == 'price':
+        keywords = ['цена', 'price', 'cost', 'сумма', 'rub', 'руб']
+        for k in keywords:
+            for i, col_name in enumerate(cols_lower):
+                if k in col_name:
+                    return cols[i]
     return None
 
 def process_files(file1, file2, threshold):
-    # Читаем файлы
     df1 = pd.read_excel(file1)
     df2 = pd.read_excel(file2)
     
-    # --- Поиск колонок в Файле 1 (Основной) ---
-    # 1. Ищем Код (Артикул)
-    code_col1 = find_column(df1, ['код', 'code', 'sku', 'артикул', 'id', 'art'])
-    # 2. Ищем Наименование
-    name_col1 = find_column(df1, ['наим', 'name', 'товар', 'product'])
-    # 3. Ищем Цену
-    price_col1 = find_column(df1, ['цен', 'price', 'cost', 'sum'])
+    # 1. Определяем колонки
+    code_col1 = find_best_column(df1, 'code')
+    name_col1 = find_best_column(df1, 'name')
+    price_col1 = find_best_column(df1, 'price')
     
-    # --- Поиск колонок в Файле 2 (Конкурент) ---
-    name_col2 = find_column(df2, ['наим', 'name', 'товар', 'product'])
-    price_col2 = find_column(df2, ['цен', 'price', 'cost', 'sum'])
+    name_col2 = find_best_column(df2, 'name')
+    price_col2 = find_best_column(df2, 'price')
 
-    # Проверка, все ли нашлось
-    if not name_col1 or not price_col1:
-        st.error(f"В файле 1 не найдены колонки Наименования или Цены. Найденные колонки: {list(df1.columns)}")
-        return None
-    if not name_col2 or not price_col2:
-        st.error(f"В файле 2 не найдены колонки Наименования или Цены. Найденные колонки: {list(df2.columns)}")
+    # Диагностика (показываем пользователю, что нашел скрипт)
+    st.info(f"""
+    **Распознанные колонки:**
+    Файл 1: Название='{name_col1}', Цена='{price_col1}', Код='{code_col1}'
+    Файл 2: Название='{name_col2}', Цена='{price_col2}'
+    """)
+
+    if not name_col1 or not price_col1 or not name_col2 or not price_col2:
+        st.error("Не удалось найти необходимые колонки (Название или Цена). Проверьте заголовки файлов.")
         return None
 
-    # Очистка имен для поиска
     df1['clean_name'] = df1[name_col1].apply(clean_name)
     df2['clean_name'] = df2[name_col2].apply(clean_name)
     
-    # Векторизация и поиск
     vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
     tfidf_matrix1 = vectorizer.fit_transform(df1['clean_name'].astype(str))
     tfidf_matrix2 = vectorizer.transform(df2['clean_name'].astype(str))
@@ -70,6 +92,7 @@ def process_files(file1, file2, threshold):
     
     matches = []
     
+    # Прогресс бар
     progress_bar = st.progress(0)
     total_items = len(df1)
     
@@ -81,7 +104,6 @@ def process_files(file1, file2, threshold):
         score = cosine_sim[i][best_idx]
         
         if score > threshold:
-            # Формируем строку результата
             row = {
                 'Товар (Наш)': df1.iloc[i][name_col1],
                 'Товар (Конкурент)': df2.iloc[best_idx][name_col2],
@@ -89,12 +111,10 @@ def process_files(file1, file2, threshold):
                 'Цена (Наша)': df1.iloc[i][price_col1],
                 'Цена (Конкурент)': df2.iloc[best_idx][price_col2]
             }
-            # Если нашли колонку с кодом, добавляем её в начало
             if code_col1:
                 row['Код товара'] = df1.iloc[i][code_col1]
             else:
                 row['Код товара'] = '—'
-                
             matches.append(row)
             
     progress_bar.progress(100)
@@ -103,61 +123,34 @@ def process_files(file1, file2, threshold):
         return None
         
     res_df = pd.DataFrame(matches)
-    
-    # Считаем разницу
     res_df['Разница'] = res_df['Цена (Наша)'] - res_df['Цена (Конкурент)']
     
-    # Красивый порядок колонок
-    cols = ['Код товара', 'Товар (Наш)', 'Товар (Конкурент)', 'Цена (Наша)', 'Цена (Конкурент)', 'Разница', 'Сходство (%)']
-    # Если каких-то колонок нет (вдруг ошибка), берем только те, что есть
-    final_cols = [c for c in cols if c in res_df.columns]
-    res_df = res_df[final_cols]
+    # Сортировка колонок
+    cols_order = ['Код товара', 'Товар (Наш)', 'Товар (Конкурент)', 'Цена (Наша)', 'Цена (Конкурент)', 'Разница', 'Сходство (%)']
+    final_cols = [c for c in cols_order if c in res_df.columns]
     
-    return res_df
+    return res_df[final_cols]
 
-# --- Интерфейс ---
-
+# --- UI ---
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("1. Основной файл (с кодами)")
-    file1 = st.file_uploader("Загрузить файл", type=['xlsx', 'xls'], key="f1")
-
+    file1 = st.file_uploader("Файл 1 (Основной)", type=['xlsx', 'xls'], key="f1")
 with col2:
-    st.subheader("2. Файл для сравнения")
-    file2 = st.file_uploader("Загрузить файл", type=['xlsx', 'xls'], key="f2")
+    file2 = st.file_uploader("Файл 2 (Конкурент)", type=['xlsx', 'xls'], key="f2")
 
-with st.expander("⚙️ Настройки точности поиска"):
-    threshold_val = st.slider(
-        "Минимальный порог сходства", 
-        min_value=0.0, max_value=1.0, value=0.65, step=0.05
-    )
+threshold_val = st.slider("Порог сходства", 0.0, 1.0, 0.65, 0.05)
 
 if file1 and file2:
-    if st.button("🚀 Начать сравнение", type="primary"):
-        with st.spinner('Ищем совпадения и коды...'):
-            try:
-                result_df = process_files(file1, file2, threshold_val)
-                
-                if result_df is not None and not result_df.empty:
-                    st.success(f"Готово! Найдено совпадений: {len(result_df)}")
-                    
-                    total_diff = result_df['Разница'].sum()
-                    st.metric("Общая разница в цене", f"{total_diff:.2f} ₽")
-                    
-                    st.dataframe(result_df, use_container_width=True)
-                    
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                        result_df.to_excel(writer, index=False, sheet_name='Сравнение')
-                    
-                    st.download_button(
-                        label="📥 Скачать таблицу с кодами (Excel)",
-                        data=buffer.getvalue(),
-                        file_name="sravnenie_s_kodami.xlsx",
-                        mime="application/vnd.ms-excel"
-                    )
-                else:
-                    st.warning("Совпадений не найдено. Попробуйте уменьшить порог.")
-            except Exception as e:
-                st.error(f"Ошибка: {e}")
+    if st.button("🚀 Сравнить", type="primary"):
+        res = process_files(file1, file2, threshold_val)
+        if res is not None and not res.empty:
+            st.success(f"Найдено совпадений: {len(res)}")
+            st.dataframe(res, use_container_width=True)
+            
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                res.to_excel(writer, index=False)
+            
+            st.download_button("Скачать Excel", buffer.getvalue(), "result.xlsx")
+        else:
+            st.warning("Ничего не найдено. Проверьте колонки (см. синий блок выше).")

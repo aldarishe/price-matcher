@@ -71,7 +71,9 @@ def find_best_column(df, target_type):
     return None
 
 def process_files(file1, file2, threshold):
-    df1 = pd.read_excel(file1; "наш прайс")
+    st.markdown("""наш прайс)
+""")
+    df1 = pd.read_excel(file1)
     df2 = pd.read_excel(file2)
     
     name_col1 = find_best_column(df1, 'name')
@@ -177,6 +179,7 @@ if file1 and file2:
             st.download_button("Скачать", b.getvalue(), "result_checked.xlsx")
         else:
             st.warning("Ничего не найдено.")
+
 
 
 
